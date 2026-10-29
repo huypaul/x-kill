@@ -1,0 +1,42 @@
+{
+  "name": "xkill",
+  "version": "1.0.0",
+  "description": "Fast, interactive CLI tool to inspect and clean heavy project directories like node_modules, .next, dist, and build.",
+  "main": "./dist/index.js",
+  "scripts": {
+    "dev": "tsx src/index.tsx",
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "bin": {
+    "xkill": "./dist/index.js",
+    "x-kill": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "12.16.1",
+      "onFail": "download"
+    }
+  },
+  "packageManager": "pnpm@12.16.1",
+  "type": "module",
+  "dependencies": {
+    "ink": "^8.0.0",
+    "meow": "^14.1.0",
+    "react": "^19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}
