@@ -18,19 +18,13 @@
   "keywords": [],
   "author": "",
   "license": "MIT",
-  "devEngines": {
-    "packageManager": {
-      "name": "pnpm",
-      "version": "12.16.1",
-      "onFail": "download"
-    }
-  },
-  "packageManager": "pnpm@12.16.1",
   "type": "module",
   "dependencies": {
+    "fdir": "^6.4.3",
     "ink": "^8.0.0",
     "meow": "^14.1.0",
-    "react": "^19.3.1"
+    "react": "^19.3.1",
+    "trash": "^9.0.0"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

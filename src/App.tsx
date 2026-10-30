@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Text, Box, useInput, useApp } from "ink";
 import fs from "node:fs/promises";
 import { scanTargets, formatBytes, ScanResult } from "./fs-utils.js";
+import { deleteItem } from "./delete-utils.js";
 
 type ItemStatus = "found" | "deleting" | "deleted" | "error";
 
@@ -11,11 +12,18 @@ interface TargetItem {
   lastMod: number;
   status: ItemStatus;
   errorMsg?: string;
+  isEmpty?: boolean;
+  isLocked?: boolean;
 }
 
 export interface AppProps {
   baseDir?: string;
   targetNames?: string[];
+  preset?: string;
+  patterns?: string[];
+  cleanEmpty?: boolean;
+  olderThanMs?: number;
+  trash?: boolean;
 }
 
 const DEFAULT_TARGETS = ["node_modules", ".next", "dist", "build", "target"];
@@ -30,8 +38,14 @@ function truncateMiddle(text: string, maxLen: number): string {
 
 export default function App({
   baseDir = process.cwd(),
-  targetNames = DEFAULT_TARGETS,
+  targetNames,
+  preset,
+  patterns,
+  cleanEmpty,
+  olderThanMs,
+  trash,
 }: AppProps) {
+  const activeTargets = targetNames ?? (!patterns && !cleanEmpty ? DEFAULT_TARGETS : undefined);
   const { exit } = useApp();
   const [items, setItems] = useState<TargetItem[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -74,11 +88,19 @@ export default function App({
           size: result.size,
           lastMod,
           status: "found",
+          isEmpty: result.isEmpty,
         },
       ]);
     };
 
-    scanTargets(baseDir, targetNames, handleFound, signal).then(() => {
+    scanTargets(baseDir, {
+      targetNames: activeTargets,
+      patterns,
+      cleanEmpty,
+      olderThanMs,
+      signal,
+      onFound: handleFound,
+    }).then(() => {
       if (!signal.aborted) {
         setIsSearching(false);
         setSearchTime(((performance.now() - startTime) / 1000).toFixed(2));
@@ -88,7 +110,13 @@ export default function App({
     return () => {
       abortController.abort();
     };
-  }, [baseDir, targetNames]);
+  }, [
+    baseDir,
+    activeTargets ? activeTargets.join(",") : "",
+    patterns ? patterns.join(",") : "",
+    cleanEmpty,
+    olderThanMs,
+  ]);
 
   useInput((input, key) => {
     if (confirmTarget) {
@@ -128,19 +156,25 @@ export default function App({
     setItems((prev) =>
       prev.map((it) => (it.path === targetPath ? { ...it, status: "deleting" } : it)),
     );
-    try {
-      await fs.rm(targetPath, { recursive: true, force: true });
+    const result = await deleteItem(targetPath, Boolean(trash));
+    if (result.success) {
       setItems((prev) =>
         prev.map((it) =>
-          it.path === targetPath ? { ...it, status: "deleted", size: 0 } : it,
+          it.path === targetPath
+            ? { ...it, status: "deleted", size: 0, isLocked: false }
+            : it,
         ),
       );
       setSpaceSaved((prev) => prev + size);
-    } catch (error: any) {
-      const errorMsg = error?.code || error?.message || "Failed";
+    } else {
+      const errorMsg = result.isLocked
+        ? "LOCKED (in use)"
+        : (result.error || "Failed");
       setItems((prev) =>
         prev.map((it) =>
-          it.path === targetPath ? { ...it, status: "error", errorMsg } : it,
+          it.path === targetPath
+            ? { ...it, status: "error", errorMsg, isLocked: result.isLocked }
+            : it,
         ),
       );
     }
@@ -152,7 +186,12 @@ export default function App({
   const pendingTasks = items.filter((i) => i.status === "deleting").length;
 
   const terminalRows = process.stdout?.rows || 24;
-  const maxVisibleItems = Math.max(5, terminalRows - 11);
+  const headerOffset =
+    11 +
+    (preset ? 1 : 0) +
+    (patterns && patterns.length > 0 ? 1 : 0) +
+    (trash || cleanEmpty || olderThanMs !== undefined ? 1 : 0);
+  const maxVisibleItems = Math.max(5, terminalRows - headerOffset);
   const clampedIndex =
     items.length === 0 ? 0 : Math.min(Math.max(0, selectedIndex), items.length - 1);
   const halfVisible = Math.floor(maxVisibleItems / 2);
@@ -178,16 +217,40 @@ export default function App({
             </Text>
             <Text color="gray"> v1.0.0</Text>
           </Box>
+          {preset && (
+            <Box flexDirection="row">
+              <Text color="gray">Preset: </Text>
+              <Text color="magenta" bold>
+                {preset}
+              </Text>
+            </Box>
+          )}
           <Box flexDirection="row">
             <Text color="gray">Directory: </Text>
             <Text color="white" bold>
               {truncateMiddle(baseDir, 50)}
             </Text>
           </Box>
-          <Box flexDirection="row">
-            <Text color="gray">Targets: </Text>
-            <Text color="yellow">{targetNames.join(", ")}</Text>
-          </Box>
+          {activeTargets && activeTargets.length > 0 && (
+            <Box flexDirection="row">
+              <Text color="gray">Targets: </Text>
+              <Text color="yellow">{activeTargets.join(", ")}</Text>
+            </Box>
+          )}
+          {patterns && patterns.length > 0 && (
+            <Box flexDirection="row">
+              <Text color="gray">Patterns: </Text>
+              <Text color="yellow">{patterns.join(", ")}</Text>
+            </Box>
+          )}
+          {(trash || cleanEmpty || olderThanMs !== undefined) && (
+            <Box flexDirection="row">
+              <Text color="gray">Modes: </Text>
+              {trash && <Text color="green" bold>[Recycle Bin] </Text>}
+              {cleanEmpty && <Text color="cyan" bold>[Empty Dirs] </Text>}
+              {olderThanMs !== undefined && <Text color="yellow" bold>[Filtered Age] </Text>}
+            </Box>
+          )}
         </Box>
 
         <Box flexDirection="column" alignItems="flex-end">
@@ -219,7 +282,9 @@ export default function App({
       {confirmTarget ? (
         <Box flexDirection="row" backgroundColor="red" paddingX={1}>
           <Text color="white" bold>
-            ⚠ Delete "{truncateMiddle(confirmTarget, 60)}"? Press [y] Confirm • [n / Esc] Cancel
+            {trash
+              ? `⚠ Move "${truncateMiddle(confirmTarget, 60)}" to Recycle Bin? Press [y] Confirm • [n / Esc] Cancel`
+              : `⚠ Permanently delete "${truncateMiddle(confirmTarget, 60)}"? Press [y] Confirm • [n / Esc] Cancel`}
           </Text>
         </Box>
       ) : (
@@ -271,8 +336,15 @@ export default function App({
               badge = "✔ [DELETED]";
               badgeColor = isSelected ? "black" : "green";
             } else if (item.status === "error") {
-              badge = "✖ [ERROR]";
+              if (item.isLocked || item.errorMsg?.includes("LOCKED")) {
+                badge = "🔒 [LOCKED]";
+              } else {
+                badge = "✖ [ERROR]";
+              }
               badgeColor = isSelected ? "black" : "red";
+            } else if (item.isEmpty) {
+              badge = "[EMPTY]";
+              badgeColor = isSelected ? "black" : "gray";
             }
 
             const prefix = isSelected ? "❯ " : "  ";
@@ -283,10 +355,11 @@ export default function App({
                 key={item.path}
                 flexDirection="row"
                 backgroundColor={isSelected ? "green" : undefined}>
-                <Box width={16}>
+                <Box width={20}>
                   <Text
                     color={isSelected ? "black" : badgeColor}
-                    bold={isSelected}>
+                    bold={isSelected}
+                    wrap="truncate-end">
                     {statusDisplay}
                   </Text>
                 </Box>
