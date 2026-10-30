@@ -258,4 +258,67 @@ describe('scanTargets', () => {
     expect(paths).toContain(oldFile);
     expect(paths).not.toContain(newFile);
   });
+
+  it('does not return non-empty node_modules when only cleanEmpty is true', async () => {
+    const nmDir = path.join(testDir, 'node_modules');
+    await fs.mkdir(nmDir, { recursive: true });
+    await fs.writeFile(path.join(nmDir, 'package.json'), '{"name":"pkg"}');
+
+    const emptyDir = path.join(testDir, 'empty-dir');
+    await fs.mkdir(emptyDir, { recursive: true });
+
+    const results = await scanTargets(testDir, {
+      cleanEmpty: true,
+    });
+
+    const paths = results.map((r) => r.path);
+    expect(paths).toContain(emptyDir);
+    expect(paths).not.toContain(nmDir);
+  });
+
+  it('matches subpath targets like pip/cache', async () => {
+    const pipCacheDir = path.join(testDir, 'pip', 'cache');
+    await fs.mkdir(pipCacheDir, { recursive: true });
+    await fs.writeFile(path.join(pipCacheDir, 'cached.whl'), Buffer.alloc(256));
+
+    const otherDir = path.join(testDir, 'pip', 'other');
+    await fs.mkdir(otherDir, { recursive: true });
+    await fs.writeFile(path.join(otherDir, 'file.txt'), Buffer.alloc(100));
+
+    const results = await scanTargets(testDir, {
+      targetNames: ['pip/cache'],
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0].path).toBe(pipCacheDir);
+    expect(results[0].size).toBe(256);
+  });
+
+  it('filters empty directories by olderThanMs when cleanEmpty is true', async () => {
+    const oldEmptyDir = path.join(testDir, 'old-empty');
+    const newEmptyDir = path.join(testDir, 'new-empty');
+    await fs.mkdir(oldEmptyDir, { recursive: true });
+    await fs.mkdir(newEmptyDir, { recursive: true });
+
+    const pastTime = new Date(Date.now() - 1000 * 60 * 60); // 1 hour ago
+    await fs.utimes(oldEmptyDir, pastTime, pastTime);
+
+    const results = await scanTargets(testDir, {
+      cleanEmpty: true,
+      olderThanMs: 1000 * 60 * 10, // older than 10 mins
+    });
+
+    const paths = results.map((r) => r.path);
+    expect(paths).toContain(oldEmptyDir);
+    expect(paths).not.toContain(newEmptyDir);
+  });
+
+  it('respects positional ignoredDirs when 2nd argument is undefined', async () => {
+    const ignoredFolder = path.join(testDir, 'custom-ignored', 'node_modules');
+    await fs.mkdir(ignoredFolder, { recursive: true });
+    await fs.writeFile(path.join(ignoredFolder, 'file.txt'), 'test');
+
+    const results = await scanTargets(testDir, undefined, undefined, undefined, ['custom-ignored']);
+    expect(results).toHaveLength(0);
+  });
 });

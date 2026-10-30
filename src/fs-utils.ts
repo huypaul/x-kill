@@ -227,10 +227,12 @@ export async function scanTargets(
       abortSignal = optionsOrTargets.signal;
     }
   } else {
-    targetNames = ['node_modules', '.next', 'dist', 'build', 'target'];
+    if (ignoredDirs) {
+      ignoredDirsList = ignoredDirs;
+    }
   }
 
-  if (!targetNames && !patterns) {
+  if (!targetNames && !patterns && !cleanEmpty) {
     targetNames = ['node_modules', '.next', 'dist', 'build', 'target'];
   }
 
@@ -247,13 +249,33 @@ export async function scanTargets(
     return [];
   }
 
-  const targetSet = targetNames ? new Set(targetNames) : null;
+  const targetSet = targetNames
+    ? new Set(targetNames.filter((t) => !t.includes('/') && !t.includes('\\')))
+    : null;
+  const subpathTargets = (targetNames || [])
+    .filter((t) => t.includes('/') || t.includes('\\'))
+    .map((t) => t.replace(/\\/g, '/'));
   const compiledPatterns = patterns ? patterns.map(compileGlobPattern) : null;
   const ignoredSet = new Set(ignoredDirsList);
 
   function isMatch(name: string, relativePath: string): boolean {
     if (targetSet && targetSet.has(name)) {
       return true;
+    }
+    if (subpathTargets.length > 0) {
+      const normalizedRel = relativePath.replace(/\\/g, '/');
+      const lowerRel = normalizedRel.toLowerCase();
+      for (const target of subpathTargets) {
+        const lowerTarget = target.toLowerCase();
+        if (
+          normalizedRel === target ||
+          normalizedRel.endsWith('/' + target) ||
+          lowerRel === lowerTarget ||
+          lowerRel.endsWith('/' + lowerTarget)
+        ) {
+          return true;
+        }
+      }
     }
     if (compiledPatterns) {
       const normalizedRel = relativePath.replace(/\\/g, '/');
@@ -367,6 +389,12 @@ export async function scanTargets(
     for (const emptyCandidate of nonTargetDirs) {
       if (abortSignal?.aborted) return results;
       try {
+        if (olderThanMs !== undefined) {
+          const stat = await fs.lstat(emptyCandidate);
+          if (Date.now() - stat.mtimeMs < olderThanMs) {
+            continue;
+          }
+        }
         const entries = await fs.readdir(emptyCandidate);
         if (entries.length === 0) {
           const item: ScanResult = {

@@ -81,7 +81,17 @@ describe('resolvePreset', () => {
     expect(resolvePreset('  Default  ')?.name).toBe('build-dirs');
   });
 
-  it('returns undefined for unknown preset names', () => {
+  it('resolves aliases node, appdata-temp, and dev-caches', () => {
+    expect(resolvePreset('node')?.name).toBe('build-dirs');
+    expect(resolvePreset('NODE')?.name).toBe('build-dirs');
+    expect(resolvePreset('appdata-temp')?.name).toBe('appdata');
+    expect(resolvePreset('dev-caches')?.name).toBe('dev-cache');
+  });
+
+  it('guards against prototype pollution and unknown preset names', () => {
+    expect(resolvePreset('toString')).toBeUndefined();
+    expect(resolvePreset('valueOf')).toBeUndefined();
+    expect(resolvePreset('__proto__')).toBeUndefined();
     expect(resolvePreset('unknown')).toBeUndefined();
     expect(resolvePreset('')).toBeUndefined();
     expect(resolvePreset('   ')).toBeUndefined();

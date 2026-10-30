@@ -53,15 +53,25 @@ export const PRESETS: Record<string, PresetDefinition> = {
   },
 };
 
+export const PRESET_ALIASES: Record<string, string> = {
+  default: 'build-dirs',
+  node: 'build-dirs',
+  'appdata-temp': 'appdata',
+  'dev-caches': 'dev-cache',
+};
+
 export function resolvePreset(name: string): PresetDefinition | undefined {
   if (!name || typeof name !== 'string') {
     return undefined;
   }
   const normalized = name.trim().toLowerCase();
-  if (normalized === 'default') {
-    return PRESETS['build-dirs'];
-  }
-  return PRESETS[normalized];
+  const targetKey = Object.prototype.hasOwnProperty.call(PRESET_ALIASES, normalized)
+    ? PRESET_ALIASES[normalized]
+    : normalized;
+
+  return Object.prototype.hasOwnProperty.call(PRESETS, targetKey)
+    ? PRESETS[targetKey]
+    : undefined;
 }
 
 export function listPresets(): PresetDefinition[] {
