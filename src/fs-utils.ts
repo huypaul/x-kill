@@ -1,10 +1,22 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { fdir } from 'fdir';
 
 export interface ScanResult {
   path: string;
   size: number;
   isDirectory: boolean;
+  isEmpty?: boolean;
+}
+
+export interface ScanOptions {
+  targetNames?: string[];
+  patterns?: string[];
+  cleanEmpty?: boolean;
+  olderThanMs?: number;
+  ignoredDirs?: string[];
+  signal?: AbortSignal;
+  onFound?: (item: ScanResult) => void;
 }
 
 export const DEFAULT_IGNORED_DIRS = [
@@ -146,57 +158,233 @@ export async function getPathSize(
   });
 }
 
+function compileGlobPattern(pattern: string): { regex: RegExp; matchPath: boolean } {
+  const matchPath = pattern.includes('/') || pattern.includes('\\');
+  const normalizedPattern = pattern.replace(/\\/g, '/');
+
+  let regexStr = '^';
+  for (let i = 0; i < normalizedPattern.length; i++) {
+    const c = normalizedPattern[i];
+    if (c === '*') {
+      if (normalizedPattern[i + 1] === '*') {
+        regexStr += '.*';
+        i++;
+      } else {
+        regexStr += matchPath ? '[^/]*' : '.*';
+      }
+    } else if (c === '?') {
+      regexStr += matchPath ? '[^/]' : '.';
+    } else if (
+      ['.', '+', '^', '$', '{', '}', '(', ')', '|', '[', ']', '\\'].includes(c)
+    ) {
+      regexStr += '\\' + c;
+    } else {
+      regexStr += c;
+    }
+  }
+  regexStr += '$';
+  return {
+    regex: new RegExp(regexStr, 'i'),
+    matchPath,
+  };
+}
+
 /**
- * Recursively scans directories to find target directory/file names.
+ * Recursively scans directories to find target directory/file names using fdir engine.
  */
 export async function scanTargets(
   rootDir: string,
-  targetNames: string[] = ['node_modules', '.next', 'dist', 'build', 'target'],
+  optionsOrTargets?: ScanOptions | string[],
   onFound?: (item: ScanResult) => void,
   signal?: AbortSignal,
-  ignoredDirs: string[] = DEFAULT_IGNORED_DIRS
+  ignoredDirs?: string[]
 ): Promise<ScanResult[]> {
-  const results: ScanResult[] = [];
-  const ignoredSet = new Set(ignoredDirs);
+  let targetNames: string[] | undefined;
+  let patterns: string[] | undefined;
+  let cleanEmpty: boolean | undefined;
+  let olderThanMs: number | undefined;
+  let ignoredDirsList: string[] = DEFAULT_IGNORED_DIRS;
+  let onFoundCallback: ((item: ScanResult) => void) | undefined = onFound;
+  let abortSignal: AbortSignal | undefined = signal;
 
-  async function traverse(currentDir: string): Promise<void> {
-    if (signal?.aborted) return;
-
-    let entries;
-    try {
-      entries = await fs.readdir(currentDir, { withFileTypes: true });
-    } catch {
-      return;
+  if (Array.isArray(optionsOrTargets)) {
+    targetNames = optionsOrTargets;
+    if (ignoredDirs) {
+      ignoredDirsList = ignoredDirs;
     }
+  } else if (optionsOrTargets && typeof optionsOrTargets === 'object') {
+    targetNames = optionsOrTargets.targetNames;
+    patterns = optionsOrTargets.patterns;
+    cleanEmpty = optionsOrTargets.cleanEmpty;
+    olderThanMs = optionsOrTargets.olderThanMs;
+    if (optionsOrTargets.ignoredDirs) {
+      ignoredDirsList = optionsOrTargets.ignoredDirs;
+    }
+    if (optionsOrTargets.onFound) {
+      onFoundCallback = optionsOrTargets.onFound;
+    }
+    if (optionsOrTargets.signal) {
+      abortSignal = optionsOrTargets.signal;
+    }
+  } else {
+    targetNames = ['node_modules', '.next', 'dist', 'build', 'target'];
+  }
 
-    for (const entry of entries) {
-      if (signal?.aborted) return;
-      const fullPath = path.join(currentDir, entry.name);
+  if (!targetNames && !patterns) {
+    targetNames = ['node_modules', '.next', 'dist', 'build', 'target'];
+  }
 
-      if (targetNames.includes(entry.name)) {
-        const size = await getPathSize(fullPath, signal);
-        if (signal?.aborted) return;
+  if (abortSignal?.aborted) {
+    return [];
+  }
 
-        const item: ScanResult = {
-          path: fullPath,
-          size,
-          isDirectory: entry.isDirectory(),
-        };
-        results.push(item);
-        if (onFound) onFound(item);
+  try {
+    const rootStat = await fs.lstat(rootDir);
+    if (!rootStat.isDirectory()) {
+      return [];
+    }
+  } catch {
+    return [];
+  }
+
+  const targetSet = targetNames ? new Set(targetNames) : null;
+  const compiledPatterns = patterns ? patterns.map(compileGlobPattern) : null;
+  const ignoredSet = new Set(ignoredDirsList);
+
+  function isMatch(name: string, relativePath: string): boolean {
+    if (targetSet && targetSet.has(name)) {
+      return true;
+    }
+    if (compiledPatterns) {
+      const normalizedRel = relativePath.replace(/\\/g, '/');
+      for (const p of compiledPatterns) {
+        if (p.matchPath) {
+          if (p.regex.test(normalizedRel)) return true;
+        } else {
+          if (p.regex.test(name)) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  const matchedDirs: string[] = [];
+  const nonTargetDirs: string[] = [];
+
+  let crawler = new fdir()
+    .withFullPaths()
+    .exclude((dirName, dirPath) => {
+      if (ignoredSet.has(dirName)) return true;
+      const fullDirPath = path.resolve(dirPath);
+      const relPath = path.relative(rootDir, fullDirPath);
+      if (isMatch(dirName, relPath)) {
+        matchedDirs.push(fullDirPath);
+        return true;
+      }
+      if (cleanEmpty) {
+        nonTargetDirs.push(fullDirPath);
+      }
+      return false;
+    })
+    .filter((filePath) => {
+      const fileName = path.basename(filePath);
+      const relPath = path.relative(rootDir, filePath);
+      return isMatch(fileName, relPath);
+    });
+
+  if (abortSignal) {
+    crawler = crawler.withAbortSignal(abortSignal);
+  }
+
+  let matchedFiles: string[] = [];
+  try {
+    matchedFiles = (await crawler.crawl(rootDir).withPromise()) as string[];
+  } catch {
+    return [];
+  }
+
+  if (abortSignal?.aborted) {
+    return [];
+  }
+
+  const results: ScanResult[] = [];
+
+  for (const dirPath of matchedDirs) {
+    if (abortSignal?.aborted) return results;
+
+    if (olderThanMs !== undefined) {
+      try {
+        const stat = await fs.lstat(dirPath);
+        if (Date.now() - stat.mtimeMs < olderThanMs) {
+          continue;
+        }
+      } catch {
         continue;
       }
+    }
 
-      if (
-        entry.isDirectory() &&
-        !entry.isSymbolicLink() &&
-        !ignoredSet.has(entry.name)
-      ) {
-        await traverse(fullPath);
+    const size = await getPathSize(dirPath, abortSignal);
+    if (abortSignal?.aborted) return results;
+
+    const item: ScanResult = {
+      path: dirPath,
+      size,
+      isDirectory: true,
+      isEmpty: size === 0,
+    };
+    results.push(item);
+    if (onFoundCallback) {
+      onFoundCallback(item);
+    }
+  }
+
+  for (const filePath of matchedFiles) {
+    if (abortSignal?.aborted) return results;
+
+    let size = 0;
+    try {
+      const stat = await fs.lstat(filePath);
+      if (olderThanMs !== undefined && Date.now() - stat.mtimeMs < olderThanMs) {
+        continue;
+      }
+      size = stat.size;
+    } catch {
+      continue;
+    }
+
+    const item: ScanResult = {
+      path: filePath,
+      size,
+      isDirectory: false,
+    };
+    results.push(item);
+    if (onFoundCallback) {
+      onFoundCallback(item);
+    }
+  }
+
+  if (cleanEmpty) {
+    for (const emptyCandidate of nonTargetDirs) {
+      if (abortSignal?.aborted) return results;
+      try {
+        const entries = await fs.readdir(emptyCandidate);
+        if (entries.length === 0) {
+          const item: ScanResult = {
+            path: emptyCandidate,
+            size: 0,
+            isDirectory: true,
+            isEmpty: true,
+          };
+          results.push(item);
+          if (onFoundCallback) {
+            onFoundCallback(item);
+          }
+        }
+      } catch {
+        // ignore unreadable dirs
       }
     }
   }
 
-  await traverse(rootDir);
   return results;
 }
