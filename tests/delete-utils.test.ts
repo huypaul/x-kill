@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import trash from 'trash';
-import { deleteItem, type DeleteResult } from '../src/delete-utils.js';
+import { deleteItem, makeWritable, type DeleteResult } from '../src/delete-utils.js';
 
 vi.mock('trash', async (importOriginal) => {
   const actual = await importOriginal<typeof import('trash')>();
@@ -223,6 +223,144 @@ describe('deleteItem', () => {
         error: 'Trash binary unavailable',
         isLocked: false,
       });
+    });
+  });
+
+  describe('force deletion (force = true)', () => {
+    it('resets read-only permissions via makeWritable helper', async () => {
+      const filePath = path.join(tempDir, 'ro-helper.txt');
+      await fs.writeFile(filePath, 'readonly content');
+      await fs.chmod(filePath, 0o444);
+
+      await makeWritable(filePath);
+
+      await fs.writeFile(filePath, 'updated content');
+      const content = await fs.readFile(filePath, 'utf-8');
+      expect(content).toBe('updated content');
+    });
+
+    it('deletes a read-only file when force is true', async () => {
+      const filePath = path.join(tempDir, 'readonly-file.txt');
+      await fs.writeFile(filePath, 'read only data');
+      await fs.chmod(filePath, 0o444);
+
+      const result = await deleteItem(filePath, false, true);
+
+      expect(result).toEqual<DeleteResult>({
+        success: true,
+        path: filePath,
+      });
+      await expect(fs.access(filePath)).rejects.toThrow();
+    });
+
+    it('deletes a directory containing nested read-only files when force is true', async () => {
+      const dirPath = path.join(tempDir, 'ro-dir');
+      const nestedPath = path.join(dirPath, 'nested-ro.txt');
+      await fs.mkdir(dirPath, { recursive: true });
+      await fs.writeFile(nestedPath, 'nested data');
+      await fs.chmod(nestedPath, 0o444);
+
+      const result = await deleteItem(dirPath, false, true);
+
+      expect(result).toEqual<DeleteResult>({
+        success: true,
+        path: dirPath,
+      });
+      await expect(fs.access(dirPath)).rejects.toThrow();
+    });
+
+    it('retries deletion after permission strip when initial deletion throws EBUSY', async () => {
+      const filePath = path.join(tempDir, 'retry-busy.txt');
+      await fs.writeFile(filePath, 'temporary');
+
+      const busyError: any = new Error('resource busy');
+      busyError.code = 'EBUSY';
+
+      vi.spyOn(fs, 'rm')
+        .mockRejectedValueOnce(busyError)
+        .mockResolvedValueOnce(undefined);
+
+      const result = await deleteItem(filePath, false, true);
+
+      expect(result).toEqual<DeleteResult>({
+        success: true,
+        path: filePath,
+      });
+      expect(fs.rm).toHaveBeenCalledTimes(2);
+    });
+
+    it('retries deletion after permission strip when initial deletion throws EPERM', async () => {
+      const filePath = path.join(tempDir, 'retry-eperm.txt');
+      await fs.writeFile(filePath, 'temporary');
+
+      const epermError: any = new Error('operation not permitted');
+      epermError.code = 'EPERM';
+
+      vi.spyOn(fs, 'rm')
+        .mockRejectedValueOnce(epermError)
+        .mockResolvedValueOnce(undefined);
+
+      const result = await deleteItem(filePath, false, true);
+
+      expect(result).toEqual<DeleteResult>({
+        success: true,
+        path: filePath,
+      });
+      expect(fs.rm).toHaveBeenCalledTimes(2);
+    });
+
+    it('returns error if retry also fails with locked error', async () => {
+      const filePath = path.join(tempDir, 'persistent-lock.txt');
+      await fs.writeFile(filePath, 'temporary');
+
+      const busyError: any = new Error('resource busy');
+      busyError.code = 'EBUSY';
+
+      vi.spyOn(fs, 'rm').mockRejectedValue(busyError);
+
+      const result = await deleteItem(filePath, false, true);
+
+      expect(result).toEqual<DeleteResult>({
+        success: false,
+        path: filePath,
+        error: 'Item is in use by another process',
+        isLocked: true,
+      });
+      expect(fs.rm).toHaveBeenCalledTimes(2);
+    });
+
+    it('respects useTrash: true when force: true', async () => {
+      const filePath = path.join(tempDir, 'force-trash.txt');
+      await fs.writeFile(filePath, 'force trash content');
+
+      const result = await deleteItem(filePath, true, true);
+
+      expect(result).toEqual<DeleteResult>({
+        success: true,
+        path: filePath,
+      });
+      expect(trash).toHaveBeenCalledWith(filePath);
+      await expect(fs.access(filePath)).rejects.toThrow();
+    });
+
+    it('does not retry when non-locked generic error occurs', async () => {
+      const filePath = path.join(tempDir, 'io-error.txt');
+      await fs.writeFile(filePath, 'temporary');
+
+      const ioError: any = new Error('Hardware failure');
+      ioError.code = 'EIO';
+
+      vi.spyOn(fs, 'rm').mockRejectedValueOnce(ioError);
+
+      const result = await deleteItem(filePath, false, true);
+
+      expect(result).toEqual<DeleteResult>({
+        success: false,
+        path: filePath,
+        error: 'Hardware failure',
+        isLocked: false,
+      });
+      expect(fs.rm).toHaveBeenCalledTimes(1);
     });
   });
 });

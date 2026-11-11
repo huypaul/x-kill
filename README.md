@@ -30,6 +30,8 @@
 | `--clean-empty` | Nhận diện và liệt kê các thư mục rỗng (size = 0, không chứa file con) | Dọn dẹp các thư mục mồ côi do ứng dụng gỡ cài đặt để lại | `xkill ./projects --clean-empty` |
 | `--older-than <time>` | Lọc theo thời gian chỉnh sửa cuối (`mtime`). Hỗ trợ đơn vị: `s` (giây), `m` (phút), `h` (giờ), `d` (ngày), `w` (tuần) | Chỉ dọn dẹp các file cache/temp cũ không dùng đến trong X ngày | `xkill -p appdata --older-than 30d` |
 | `--pattern <glob>` | Lọc các file đơn lẻ khớp với mẫu wildcard (phân tách bằng dấu phẩy) | Dọn dẹp các file log, dump, backup cụ thể | `xkill --pattern "*.log, *.tmp, *.dmp"` |
+| `--force`<br>`-f` | Bỏ qua hộp thoại xác nhận và ép gỡ quyền read-only/thử lại khi gặp lỗi khóa file | Dọn dẹp tự động, ép xóa các file cứng đầu hoặc script chạy tự động | `xkill -f` |
+| `--auto-remove`<br>`--all`, `-y` | Tự động chọn và kích hoạt xóa toàn bộ các mục tìm thấy sau khi quét xong | Dọn dẹp hàng loạt nhanh gọn mà không cần chọn thủ công từng mục | `xkill --auto-remove -f` |
 | `--target, -t` | Tùy chỉnh danh sách tên thư mục mục tiêu cần tìm kiếm | Quét các folder đặc thù riêng của dự án (`coverage`, `.cache`, `out`) | `xkill -t coverage, out, .turbo` |
 | `[path]` | Chỉ định đường dẫn thư mục gốc cần quét (tương đối hoặc tuyệt đối) | Quét ổ đĩa khác hoặc một workspace cụ thể | `xkill D:/Workspaces` |
 
@@ -109,7 +111,10 @@ xkill "C:/Users/YourUser/AppData/Local/Temp" --preset appdata --pattern "*.bak" 
 | Phím | Chức năng |
 | :--- | :--- |
 | `↑` / `↓` | Di chuyển con trỏ lên / xuống danh sách |
-| `Space` hoặc `d` | Mở hộp thoại xác nhận xóa cho mục đang chọn |
+| `Space` | Đánh dấu chọn / bỏ chọn mục đang trỏ tới (`[x]` / `[ ]`) |
+| `a` | Chọn tất cả / Bỏ chọn tất cả các mục có thể xóa |
+| `d` | Mở xác nhận xóa các mục đã chọn (hoặc mục con trỏ đang đứng nếu chưa chọn) |
+| `f` | **Force delete**: Xóa cưỡng chế ngay lập tức không cần xác nhận (tự động gỡ read-only) |
 | `y` | Xác nhận thực hiện xóa (hoặc chuyển vào Recycle Bin nếu bật `--trash`) |
 | `n` hoặc `Esc` | Hủy bỏ hộp thoại xác nhận xóa |
 | `q` hoặc `Esc` | Thoát ứng dụng ngay lập tức (hủy an toàn toàn bộ I/O đang chạy) |
@@ -183,7 +188,7 @@ pnpm install
 # Khởi chạy chế độ phát triển
 pnpm dev
 
-# Chạy toàn bộ 77 unit & integration tests (Vitest)
+# Chạy toàn bộ 103 unit & integration tests (Vitest)
 pnpm test
 
 # Biên dịch TypeScript sang ES Module

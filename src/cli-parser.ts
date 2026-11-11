@@ -10,6 +10,8 @@ export interface CliParsedOptions {
   olderThanMs?: number;
   trash?: boolean;
   patterns?: string[];
+  force?: boolean;
+  autoRemove?: boolean;
 }
 
 const DURATION_UNITS: Record<string, number> = {
@@ -58,6 +60,8 @@ export function parseCliArgs(argv: string[]): CliParsedOptions {
   let presetToken: string | undefined;
   let cleanEmptyFlag: boolean | undefined;
   let trashFlag: boolean | undefined;
+  let forceFlag: boolean | undefined;
+  let autoRemoveFlag: boolean | undefined;
   let olderThanToken: string | undefined;
   let i = 0;
 
@@ -116,6 +120,19 @@ export function parseCliArgs(argv: string[]): CliParsedOptions {
       i++;
     } else if (arg === '--trash' || arg === '--trash=true') {
       trashFlag = true;
+      i++;
+    } else if (arg === '--force' || arg === '-f' || arg === '--force=true' || arg === '-f=true') {
+      forceFlag = true;
+      i++;
+    } else if (
+      arg === '--auto-remove' ||
+      arg === '--auto-remove=true' ||
+      arg === '--all' ||
+      arg === '--all=true' ||
+      arg === '-y' ||
+      arg === '-y=true'
+    ) {
+      autoRemoveFlag = true;
       i++;
     } else if (arg === '--older-than') {
       i++;
@@ -178,6 +195,8 @@ export function parseCliArgs(argv: string[]): CliParsedOptions {
 
   const cleanEmpty = cleanEmptyFlag ? true : (presetDef?.cleanEmpty ? true : undefined);
   const trash = trashFlag ? true : undefined;
+  const force = forceFlag ? true : undefined;
+  const autoRemove = autoRemoveFlag ? true : undefined;
 
   let olderThan: string | undefined;
   let olderThanMs: number | undefined;
@@ -195,5 +214,7 @@ export function parseCliArgs(argv: string[]): CliParsedOptions {
     olderThanMs,
     trash,
     patterns,
+    force,
+    autoRemove,
   };
 }

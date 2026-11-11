@@ -17,6 +17,8 @@ meow(
     --clean-empty    Find and delete empty directories
     --older-than     Filter targets older than duration (e.g. 30d, 24h, 60m)
     --trash          Move items to OS trash / Recycle Bin instead of permanent deletion
+    --force, -f      Force delete (bypass confirmation and unlock/chmod read-only items)
+    --auto-remove, --all, -y Automatically trigger removal of all found targets
     --help           Show help
     --version        Show version
 
@@ -56,6 +58,14 @@ meow(
       trash: {
         type: 'boolean',
       },
+      force: {
+        type: 'boolean',
+        shortFlag: 'f',
+      },
+      autoRemove: {
+        type: 'boolean',
+        aliases: ['all', 'y'],
+      },
     },
   }
 );
@@ -71,5 +81,7 @@ render(
     cleanEmpty={cliOptions.cleanEmpty}
     olderThanMs={cliOptions.olderThanMs}
     trash={cliOptions.trash}
+    force={cliOptions.force}
+    autoRemove={cliOptions.autoRemove}
   />
 );

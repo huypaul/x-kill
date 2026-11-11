@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Text, Box, useInput, useApp } from "ink";
 import fs from "node:fs/promises";
 import { scanTargets, formatBytes, ScanResult } from "./fs-utils.js";
@@ -24,6 +24,8 @@ export interface AppProps {
   cleanEmpty?: boolean;
   olderThanMs?: number;
   trash?: boolean;
+  force?: boolean;
+  autoRemove?: boolean;
 }
 
 const DEFAULT_TARGETS = ["node_modules", ".next", "dist", "build", "target"];
@@ -36,6 +38,21 @@ function truncateMiddle(text: string, maxLen: number): string {
   return `${text.slice(0, left)}...${text.slice(-right)}`;
 }
 
+async function runPool<T>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<void>,
+): Promise<void> {
+  let index = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (index < items.length) {
+      const current = items[index++];
+      await fn(current);
+    }
+  });
+  await Promise.all(workers);
+}
+
 export default function App({
   baseDir = process.cwd(),
   targetNames,
@@ -44,16 +61,20 @@ export default function App({
   cleanEmpty,
   olderThanMs,
   trash,
+  force,
+  autoRemove,
 }: AppProps) {
   const activeTargets = targetNames ?? (!patterns && !cleanEmpty ? DEFAULT_TARGETS : undefined);
   const { exit } = useApp();
   const [items, setItems] = useState<TargetItem[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
-  const [confirmTarget, setConfirmTarget] = useState<string | null>(null);
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set<string>());
+  const [confirmTargets, setConfirmTargets] = useState<TargetItem[] | null>(null);
   const [isSearching, setIsSearching] = useState(true);
   const [searchTime, setSearchTime] = useState<string>("0.00");
   const [spaceSaved, setSpaceSaved] = useState(0);
   const [spinnerIndex, setSpinnerIndex] = useState(0);
+  const autoRemoveTriggered = useRef(false);
 
   useEffect(() => {
     if (!isSearching) return;
@@ -118,79 +139,168 @@ export default function App({
     olderThanMs,
   ]);
 
-  useInput((input, key) => {
-    if (confirmTarget) {
-      if (input.toLowerCase() === "y") {
-        const targetPath = confirmTarget;
-        const targetItem = items.find((i) => i.path === targetPath);
-        setConfirmTarget(null);
-        if (targetItem && (targetItem.status === "found" || targetItem.status === "error")) {
-          handleDelete(targetPath, targetItem.size);
-        }
-      } else if (input.toLowerCase() === "n" || key.escape) {
-        setConfirmTarget(null);
+  const executeBatchDelete = async (targets: TargetItem[], isForce: boolean) => {
+    if (targets.length === 0) return;
+    const targetPaths = new Set(targets.map((t) => t.path));
+    setItems((prev) =>
+      prev.map((it) => (targetPaths.has(it.path) ? { ...it, status: "deleting" } : it)),
+    );
+
+    await runPool(targets, 3, async (target) => {
+      const result = isForce
+        ? await deleteItem(target.path, Boolean(trash), true)
+        : await deleteItem(target.path, Boolean(trash));
+
+      if (result.success) {
+        setItems((prev) =>
+          prev.map((it) =>
+            it.path === target.path
+              ? { ...it, status: "deleted", size: 0, isLocked: false }
+              : it,
+          ),
+        );
+        setSelectedPaths((prev) => {
+          const next = new Set(prev);
+          next.delete(target.path);
+          return next;
+        });
+        setSpaceSaved((prev) => prev + target.size);
+      } else {
+        const errorMsg = result.isLocked
+          ? "LOCKED (in use)"
+          : (result.error || "Failed");
+        setItems((prev) =>
+          prev.map((it) =>
+            it.path === target.path
+              ? { ...it, status: "error", errorMsg, isLocked: result.isLocked }
+              : it,
+          ),
+        );
       }
-      return;
-    }
+    });
+  };
 
-    if (input === "q" || key.escape) {
-      exit();
-      return;
-    }
-
-    if (key.upArrow) setSelectedIndex((prev) => Math.max(0, prev - 1));
-    if (key.downArrow)
-      setSelectedIndex((prev) =>
-        items.length === 0 ? 0 : Math.min(items.length - 1, prev + 1),
+  const getTargets = (): TargetItem[] => {
+    if (selectedPaths.size > 0) {
+      return items.filter(
+        (it) => selectedPaths.has(it.path) && (it.status === "found" || it.status === "error"),
       );
-    if ((input === " " || input === "d") && items.length > 0) {
+    }
+    if (items.length > 0) {
       const clamped = Math.min(Math.max(0, selectedIndex), items.length - 1);
       const item = items[clamped];
       if (item && (item.status === "found" || item.status === "error")) {
-        setConfirmTarget(item.path);
+        return [item];
       }
     }
-  }, { isActive: Boolean(process.stdin?.isTTY) });
-
-  const handleDelete = async (targetPath: string, size: number) => {
-    setItems((prev) =>
-      prev.map((it) => (it.path === targetPath ? { ...it, status: "deleting" } : it)),
-    );
-    const result = await deleteItem(targetPath, Boolean(trash));
-    if (result.success) {
-      setItems((prev) =>
-        prev.map((it) =>
-          it.path === targetPath
-            ? { ...it, status: "deleted", size: 0, isLocked: false }
-            : it,
-        ),
-      );
-      setSpaceSaved((prev) => prev + size);
-    } else {
-      const errorMsg = result.isLocked
-        ? "LOCKED (in use)"
-        : (result.error || "Failed");
-      setItems((prev) =>
-        prev.map((it) =>
-          it.path === targetPath
-            ? { ...it, status: "error", errorMsg, isLocked: result.isLocked }
-            : it,
-        ),
-      );
-    }
+    return [];
   };
+
+  useEffect(() => {
+    if (autoRemove && !isSearching && !autoRemoveTriggered.current) {
+      const foundItems = items.filter((it) => it.status === "found");
+      if (foundItems.length > 0) {
+        autoRemoveTriggered.current = true;
+        if (force) {
+          executeBatchDelete(foundItems, true);
+        } else {
+          setSelectedPaths(new Set(foundItems.map((it) => it.path)));
+          setConfirmTargets(foundItems);
+        }
+      }
+    }
+  }, [autoRemove, isSearching, items, force]);
+
+  useInput(
+    (input, key) => {
+      if (confirmTargets !== null) {
+        if (input.toLowerCase() === "y") {
+          const targetsToDelete = confirmTargets;
+          setConfirmTargets(null);
+          executeBatchDelete(targetsToDelete, false);
+        } else if (input.toLowerCase() === "n" || key.escape) {
+          setConfirmTargets(null);
+        }
+        return;
+      }
+
+      if (input === "q" || key.escape) {
+        exit();
+        return;
+      }
+
+      if (key.upArrow) setSelectedIndex((prev) => Math.max(0, prev - 1));
+      if (key.downArrow)
+        setSelectedIndex((prev) =>
+          items.length === 0 ? 0 : Math.min(items.length - 1, prev + 1),
+        );
+
+      if (input === " " && items.length > 0) {
+        const clamped = Math.min(Math.max(0, selectedIndex), items.length - 1);
+        const item = items[clamped];
+        if (item) {
+          setSelectedPaths((prev) => {
+            const next = new Set(prev);
+            if (next.has(item.path)) {
+              next.delete(item.path);
+            } else if (item.status === "found" || item.status === "error") {
+              next.add(item.path);
+            }
+            return next;
+          });
+        }
+      }
+
+      if ((input === "a" || input === "A") && items.length > 0) {
+        const candidates = items.filter(
+          (c) => c.status === "found" || c.status === "error",
+        );
+        if (candidates.length > 0) {
+          setSelectedPaths((prev) => {
+            const allSelected = candidates.every((c) => prev.has(c.path));
+            const next = new Set(prev);
+            if (allSelected) {
+              candidates.forEach((c) => next.delete(c.path));
+            } else {
+              candidates.forEach((c) => next.add(c.path));
+            }
+            return next;
+          });
+        }
+      }
+
+      if (input === "d" || input === "D") {
+        const targets = getTargets();
+        if (targets.length === 0) return;
+        if (force) {
+          executeBatchDelete(targets, true);
+        } else {
+          setConfirmTargets(targets);
+        }
+      }
+
+      if (input === "f" || input === "F") {
+        const targets = getTargets();
+        if (targets.length === 0) return;
+        executeBatchDelete(targets, true);
+      }
+    },
+    { isActive: Boolean(process.stdin?.isTTY) },
+  );
 
   const releasableSpace = items
     .filter((i) => i.status === "found")
     .reduce((acc, curr) => acc + curr.size, 0);
-  const pendingTasks = items.filter((i) => i.status === "deleting").length;
+  const selectedSize = items
+    .filter((i) => selectedPaths.has(i.path))
+    .reduce((acc, curr) => acc + curr.size, 0);
 
   const terminalRows = process.stdout?.rows || 24;
   const headerOffset =
     11 +
     (preset ? 1 : 0) +
     (patterns && patterns.length > 0 ? 1 : 0) +
-    (trash || cleanEmpty || olderThanMs !== undefined ? 1 : 0);
+    (trash || cleanEmpty || olderThanMs !== undefined || force || autoRemove ? 1 : 0);
   const maxVisibleItems = Math.max(5, terminalRows - headerOffset);
   const clampedIndex =
     items.length === 0 ? 0 : Math.min(Math.max(0, selectedIndex), items.length - 1);
@@ -243,17 +353,26 @@ export default function App({
               <Text color="yellow">{patterns.join(", ")}</Text>
             </Box>
           )}
-          {(trash || cleanEmpty || olderThanMs !== undefined) && (
+          {(trash || cleanEmpty || olderThanMs !== undefined || force || autoRemove) && (
             <Box flexDirection="row">
               <Text color="gray">Modes: </Text>
               {trash && <Text color="green" bold>[Recycle Bin] </Text>}
               {cleanEmpty && <Text color="cyan" bold>[Empty Dirs] </Text>}
               {olderThanMs !== undefined && <Text color="yellow" bold>[Filtered Age] </Text>}
+              {force && <Text color="red" bold>[Force] </Text>}
+              {autoRemove && <Text color="magenta" bold>[Auto-Remove] </Text>}
             </Box>
           )}
         </Box>
 
         <Box flexDirection="column" alignItems="flex-end">
+          {selectedPaths.size > 0 && (
+            <Box flexDirection="row">
+              <Text color="yellow" bold>
+                Selected: {selectedPaths.size} ({formatBytes(selectedSize)})
+              </Text>
+            </Box>
+          )}
           <Box flexDirection="row">
             <Text color="gray">Releasable: </Text>
             <Text color="magenta" bold>
@@ -279,19 +398,23 @@ export default function App({
         </Box>
       </Box>
 
-      {confirmTarget ? (
+      {confirmTargets && confirmTargets.length > 0 ? (
         <Box flexDirection="row" backgroundColor="red" paddingX={1}>
           <Text color="white" bold>
-            {trash
-              ? `⚠ Move "${truncateMiddle(confirmTarget, 60)}" to Recycle Bin? Press [y] Confirm • [n / Esc] Cancel`
-              : `⚠ Permanently delete "${truncateMiddle(confirmTarget, 60)}"? Press [y] Confirm • [n / Esc] Cancel`}
+            {confirmTargets.length === 1
+              ? trash
+                ? `⚠ Move "${truncateMiddle(confirmTargets[0].path, 60)}" to Recycle Bin? Press [y] Confirm • [n / Esc] Cancel`
+                : `⚠ Permanently delete "${truncateMiddle(confirmTargets[0].path, 60)}"? Press [y] Confirm • [n / Esc] Cancel`
+              : trash
+                ? `⚠ Move ${confirmTargets.length} selected items (${formatBytes(confirmTargets.reduce((acc, curr) => acc + curr.size, 0))}) to Recycle Bin? Press [y] Confirm • [n / Esc] Cancel`
+                : `⚠ Permanently delete ${confirmTargets.length} selected items (${formatBytes(confirmTargets.reduce((acc, curr) => acc + curr.size, 0))})? Press [y] Confirm • [n / Esc] Cancel`}
           </Text>
         </Box>
       ) : (
         <Box flexDirection="row" backgroundColor="blue" paddingX={1}>
           <Box flexGrow={1}>
             <Text color="white" bold>
-              [↑/↓] Navigate  •  [Space/d] Delete  •  [q/Esc] Exit
+              [↑/↓] Navigate  •  [Space] Select  •  [a] All  •  [d] Delete  •  [f] Force  •  [q/Esc] Exit
             </Text>
           </Box>
           <Box width={10} justifyContent="flex-end">
@@ -348,14 +471,20 @@ export default function App({
             }
 
             const prefix = isSelected ? "❯ " : "  ";
-            const statusDisplay = badge ? `${prefix}${badge}` : prefix;
+            const checkbox =
+              item.status === "found" || item.status === "error"
+                ? selectedPaths.has(item.path)
+                  ? "[x] "
+                  : "[ ] "
+                : "    ";
+            const statusDisplay = badge ? `${prefix}${checkbox}${badge}` : `${prefix}${checkbox}`;
 
             return (
               <Box
                 key={item.path}
                 flexDirection="row"
                 backgroundColor={isSelected ? "green" : undefined}>
-                <Box width={20}>
+                <Box width={22} flexShrink={0}>
                   <Text
                     color={isSelected ? "black" : badgeColor}
                     bold={isSelected}
@@ -379,7 +508,7 @@ export default function App({
                       : ""}
                   </Text>
                 </Box>
-                <Box width={10} justifyContent="flex-end">
+                <Box width={10} justifyContent="flex-end" flexShrink={0}>
                   <Text
                     color={
                       isSelected
@@ -392,7 +521,7 @@ export default function App({
                     {item.lastMod}d
                   </Text>
                 </Box>
-                <Box width={12} justifyContent="flex-end">
+                <Box width={12} justifyContent="flex-end" flexShrink={0}>
                   <Text
                     color={
                       isSelected

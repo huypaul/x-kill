@@ -166,6 +166,34 @@ describe('parseCliArgs', () => {
     const res3 = parseCliArgs(['--pattern=*.tmp,*.log']);
     expect(res3.patterns).toEqual(['*.tmp', '*.log']);
   });
+
+  it('parses --force and -f flags', () => {
+    expect(parseCliArgs(['--force']).force).toBe(true);
+    expect(parseCliArgs(['-f']).force).toBe(true);
+    expect(parseCliArgs(['--force=true']).force).toBe(true);
+    expect(parseCliArgs(['-f=true']).force).toBe(true);
+    expect(parseCliArgs([]).force).toBeUndefined();
+  });
+
+  it('parses --auto-remove, --all, and -y flags', () => {
+    expect(parseCliArgs(['--auto-remove']).autoRemove).toBe(true);
+    expect(parseCliArgs(['--auto-remove=true']).autoRemove).toBe(true);
+    expect(parseCliArgs(['--all']).autoRemove).toBe(true);
+    expect(parseCliArgs(['--all=true']).autoRemove).toBe(true);
+    expect(parseCliArgs(['-y']).autoRemove).toBe(true);
+    expect(parseCliArgs(['-y=true']).autoRemove).toBe(true);
+    expect(parseCliArgs([]).autoRemove).toBeUndefined();
+  });
+
+  it('parses combinations of --force and --auto-remove flags', () => {
+    const res = parseCliArgs(['-f', '-y']);
+    expect(res.force).toBe(true);
+    expect(res.autoRemove).toBe(true);
+
+    const res2 = parseCliArgs(['--force', '--all']);
+    expect(res2.force).toBe(true);
+    expect(res2.autoRemove).toBe(true);
+  });
 });
 
 describe('parseDuration', () => {
