@@ -1,3 +1,7 @@
+<p align="center">
+      <img src="assets/xkill-logo.svg" alt="xkill Logo" width="720" />
+    </p>
+
 # xkill
 
 Terminal UI tool to inspect and clean project dependencies, caches, temporary files, and empty directories.
